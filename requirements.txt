@@ -1,5 +1,10 @@
 fastapi
 uvicorn
+httpx
+python-dotenv
+pydantic
+tenacity
 requests
 pytest
-httpx
+pytest-asyncio
+respx
