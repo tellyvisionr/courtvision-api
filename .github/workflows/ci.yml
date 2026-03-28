@@ -1,0 +1,241 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CourtVision API — CI / CD Pipeline
+#
+# Stages
+#   lint   → Black, Ruff (isort), mypy                (all events)
+#   test   → pytest unit + endpoint tests, ≥85% cov   (all events)
+#   build  → Docker build; push to ECR on main only   (all events)
+#   deploy → ECS Fargate rolling deploy                (main push only)
+#
+# Required GitHub Secrets (Settings → Secrets and variables → Actions)
+#   AWS_ACCESS_KEY_ID        IAM key with ECR push + ECS deploy rights
+#   AWS_SECRET_ACCESS_KEY    Corresponding secret
+#   BALLDONTLIE_API_KEY      Real key — only needed if integration tests run in CI
+#
+# Required GitHub Variables  (Settings → Secrets and variables → Variables)
+#   AWS_REGION               e.g. us-east-1
+#   ECR_REPOSITORY           ECR repo name, e.g. courtvision-api
+#   ECS_CLUSTER              ECS cluster name, e.g. courtvision-cluster
+#   ECS_SERVICE              ECS service name, e.g. courtvision-api-service
+#   TASK_DEFINITION_FAMILY   Task-def family name, e.g. courtvision-api
+#   CONTAINER_NAME           Container name inside the task def, e.g. courtvision-api
+#
+# Note: swap the static IAM key pair for OIDC (aws-actions/configure-aws-credentials
+#       role-to-assume) once your Terraform IAM OIDC provider is provisioned.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI / CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Restrict all jobs to read-only by default; each job grants only what it needs.
+permissions:
+  contents: read
+
+# ─── Shared env vars ────────────────────────────────────────────────────────
+env:
+  PYTHON_VERSION: "3.13"
+  AWS_REGION:              ${{ vars.AWS_REGION              || 'us-east-1' }}
+  ECR_REPOSITORY:          ${{ vars.ECR_REPOSITORY          || 'courtvision-api' }}
+  ECS_CLUSTER:             ${{ vars.ECS_CLUSTER             || 'courtvision-cluster' }}
+  ECS_SERVICE:             ${{ vars.ECS_SERVICE             || 'courtvision-api-service' }}
+  TASK_DEFINITION_FAMILY:  ${{ vars.TASK_DEFINITION_FAMILY  || 'courtvision-api' }}
+  CONTAINER_NAME:          ${{ vars.CONTAINER_NAME          || 'courtvision-api' }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── 1. Lint & type-check ──────────────────────────────────────────────────
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # Install all deps so the `language: system` mypy pre-commit hook
+      # can resolve imports from the project's own packages.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Runs: trailing-whitespace, end-of-file-fixer, check-yaml/toml,
+      #       black (formatting), ruff (linting + isort), mypy (type-check).
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@v3.0.1
+
+  # ── 2. Unit & endpoint tests ──────────────────────────────────────────────
+  test:
+    name: Unit & endpoint tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Three test categories all live in tests/test_balldontlie.py:
+      #   • BallDontLieClient unit tests  (individual async methods, retry logic)
+      #   • Endpoint tests                (FastAPI routes via httpx ASGI transport)
+      #   • Integration tests             (skipped unless a real API key is present)
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=85 \
+            --junitxml=test-results.xml \
+            -v
+        env:
+          # Sentinel value — keeps startup guard happy; integration tests
+          # self-skip when the key equals this placeholder string.
+          BALLDONTLIE_API_KEY: test-api-key
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 14
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 14
+
+  # ── 3. Docker build (+ ECR push on main) ─────────────────────────────────
+  build:
+    name: Docker build & push
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+
+    permissions:
+      contents: read
+      id-token: write   # reserved for future OIDC migration
+
+    # Expose the pushed image URI so the deploy job can reference it.
+    outputs:
+      image: ${{ steps.set-image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── PR: build only — validate Dockerfile compiles cleanly ──────────
+      - name: Build image (PR validation, no push)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: courtvision-api:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── main: authenticate → build → push to ECR ───────────────────────
+      - name: Configure AWS credentials
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tag with both the commit SHA (immutable) and `latest` (rolling).
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          # BuildKit layer cache — dramatically speeds up repeat builds.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Export the SHA-tagged URI so the deploy job can pin the exact image.
+      - name: Export image URI
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: set-image
+        run: |
+          echo "image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
+            >> "$GITHUB_OUTPUT"
+
+  # ── 4. Deploy to ECS Fargate ──────────────────────────────────────────────
+  deploy:
+    name: Deploy to ECS Fargate
+    runs-on: ubuntu-latest
+    needs: [build]
+    # Only runs on direct pushes to main (not PRs).
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    # "production" environment enables optional manual-approval gate and
+    # deployment tracking in the GitHub UI (Settings → Environments).
+    environment: production
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      # Pull the *current* task definition so we only change the image field —
+      # all other settings (CPU, memory, log config, IAM roles) remain intact.
+      - name: Download current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${{ env.TASK_DEFINITION_FAMILY }}" \
+            --query taskDefinition \
+            > task-def.json
+
+      # Render a new task definition revision with the freshly pushed image.
+      - name: Render new task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition:  task-def.json
+          container-name:   ${{ env.CONTAINER_NAME }}
+          image:            ${{ needs.build.outputs.image }}
+
+      # Register the rendered task definition and update the ECS service.
+      # wait-for-service-stability blocks until the new tasks are healthy
+      # behind the ALB target group before the job succeeds.
+      - name: Deploy to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition:           ${{ steps.task-def.outputs.task-definition }}
+          service:                   ${{ env.ECS_SERVICE }}
+          cluster:                   ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true

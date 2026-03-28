@@ -1,3 +1,4 @@
+# Runtime
 fastapi
 uvicorn
 httpx
@@ -5,6 +6,13 @@ python-dotenv
 pydantic
 tenacity
 requests
+
+# Dev / CI
 pytest
 pytest-asyncio
+pytest-cov
 respx
+mypy
+black
+ruff
+pre-commit
