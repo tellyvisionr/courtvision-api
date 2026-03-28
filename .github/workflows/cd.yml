@@ -1,0 +1,376 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CourtVision API — Continuous Delivery
+#
+# Pipeline topology
+# ─────────────────
+#
+#   [push / PR]
+#       │
+#       ├─ build ────────────────────────────────────────────────────────────┐
+#       │   PR:   Docker build only (Dockerfile syntax + layer validation)   │
+#       │   main: build → push to ECR with :<sha> and :latest tags           │
+#       │                                                                    │
+#       ├─ tf-plan  (PR only, skipped when infra/*.tf absent)                │
+#       │   terraform fmt -check · init · validate · plan -var-file=...      │
+#       │   → posts collapsible plan diff as a PR comment                    │
+#       │                                                                    │
+#       └─ deploy-staging  (main only, needs: build) ────────────────────────┤
+#           terraform apply -var="container_image=<ecr>:<sha>" staging       │
+#                                                                    waits   │
+#       └─ deploy-prod  (main only, needs: build + deploy-staging) ──────────┘
+#           GitHub Environment "production" → manual approval gate
+#           terraform apply -var="container_image=<ecr>:<sha>" prod
+#
+# Terraform layout assumed
+# ────────────────────────
+#   infra/
+#     main.tf            ECS cluster, Fargate service, ALB, VPC, CW logs
+#     variables.tf       includes var "container_image" used at deploy time
+#     outputs.tf
+#     backend.tf         empty S3 backend block — credentials injected by CI
+#     staging.tfvars     staging-specific values (instance sizes, subnets…)
+#     prod.tfvars        production-specific values
+#
+# Required GitHub Secrets  (Settings → Secrets and variables → Actions)
+#   AWS_ACCESS_KEY_ID        IAM key — ECR push + ECS + Terraform state rights
+#   AWS_SECRET_ACCESS_KEY    Corresponding secret key
+#
+# Required GitHub Variables (Settings → Secrets and variables → Variables)
+#   AWS_REGION               Target region, e.g. us-east-1
+#   ECR_REPOSITORY           ECR repo name,  e.g. courtvision-api
+#   TF_BACKEND_BUCKET        S3 bucket that holds Terraform state files
+#
+# GitHub Environments needed (Settings → Environments)
+#   staging    — no approval gate; auto-deploys on every merge to main
+#   production — add required reviewers for the manual-approve gate
+#
+# OIDC note
+# ─────────
+# The workflows below use long-lived IAM keys for now (simplest to bootstrap).
+# Once your Terraform provisions an IAM OIDC provider you can swap to:
+#   role-to-assume: arn:aws:iam::<acct>:role/github-actions-courtvision
+# in aws-actions/configure-aws-credentials — no other changes required.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default; individual jobs escalate only what they need.
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION:   "3.13"
+  TF_VERSION:       "~1.9"
+  TF_DIR:           infra
+  AWS_REGION:       ${{ vars.AWS_REGION       || 'us-east-1' }}
+  ECR_REPOSITORY:   ${{ vars.ECR_REPOSITORY   || 'courtvision-api' }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── 1. Docker: validate on PR / build + push on main ─────────────────────
+  build:
+    name: Docker build & push
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # reserved — will be needed when switching to OIDC
+
+    # Export the exact image URI so downstream deploy jobs can pin the
+    # SHA-tagged digest rather than the mutable :latest tag.
+    outputs:
+      image: ${{ steps.set-image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── PR: build-only validation ──────────────────────────────────────
+      # Catches Dockerfile syntax errors and broken layer dependencies
+      # without spending ECR storage or pushing untested images.
+      - name: Build image (PR validation — no push)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: courtvision-api:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      # ── main: authenticate → build → push ─────────────────────────────
+      - name: Configure AWS credentials
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push to ECR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # :<sha>   — immutable; used to pin the exact image in Terraform
+          # :latest  — rolling convenience tag for local pulls / smoke tests
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Export image URI
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: set-image
+        run: |
+          echo "image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
+            >> "$GITHUB_OUTPUT"
+
+  # ── 2. Terraform plan (PR only) ───────────────────────────────────────────
+  #
+  # Only runs when:
+  #   a) the event is a pull_request, AND
+  #   b) at least one *.tf file exists under infra/
+  #      (skips cleanly before the directory is created)
+  tf-plan:
+    name: Terraform plan — staging
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'pull_request' &&
+      hashFiles('infra/**.tf') != ''
+
+    permissions:
+      contents:      read
+      pull-requests: write   # required to post the plan comment
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      # Fail fast on formatting drift; enforces the same style locally
+      # (run `terraform fmt -recursive` to fix before pushing).
+      - name: Terraform fmt check
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive -diff
+
+      # Partial backend config — the S3 bucket/key/region are injected here
+      # rather than committed to the repo so the backend block in backend.tf
+      # can stay empty and safe to version-control.
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_BACKEND_BUCKET }}" \
+            -backend-config="key=envs/staging/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -input=false
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate -no-color
+
+      # Use a placeholder image tag during PR plans — the real SHA isn't
+      # known until the image is built and pushed on a main-branch merge.
+      - name: Terraform plan
+        id: plan
+        working-directory: ${{ env.TF_DIR }}
+        # continue-on-error so the comment step still runs even if the
+        # plan itself fails (e.g. missing variable, provider error).
+        continue-on-error: true
+        run: |
+          terraform plan \
+            -var-file=staging.tfvars \
+            -var="container_image=DRY_RUN_PLACEHOLDER" \
+            -no-color \
+            -out=tfplan \
+            2>&1 | tee plan.txt
+
+      # Post the plan output as a collapsible comment so reviewers can
+      # inspect infrastructure changes without leaving the PR.
+      - name: Post plan to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs   = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_DIR }}/plan.txt', 'utf8');
+            const outcome = '${{ steps.plan.outcome }}';
+            const icon    = outcome === 'success' ? '✅' : '❌';
+
+            // Truncate very long plans so the comment stays readable.
+            const MAX = 60000;
+            const body = plan.length > MAX
+              ? plan.slice(0, MAX) + '\n\n… truncated — download artifacts for full output'
+              : plan;
+
+            const comment = [
+              `#### ${icon} Terraform Plan — \`staging\``,
+              '',
+              '<details>',
+              '<summary>Show diff</summary>',
+              '',
+              '```hcl',
+              body,
+              '```',
+              '</details>',
+              '',
+              `> Triggered by **@${{ github.actor }}** on \`${{ github.head_ref }}\` · ${{ github.sha }}`,
+            ].join('\n');
+
+            // Update the existing bot comment if one already exists so the
+            // PR thread doesn't accumulate a comment per push to the branch.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:      context.repo.owner,
+              repo:       context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Terraform Plan — `staging`')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body:       comment,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                issue_number: context.issue.number,
+                body:       comment,
+              });
+            }
+
+      # Surface plan failures as a workflow failure AFTER the comment is
+      # posted, so reviewers see both the diff and the error.
+      - name: Fail if plan errored
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  # ── 3. Deploy to staging (main push only) ─────────────────────────────────
+  deploy-staging:
+    name: Deploy → staging
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    # Deployment history + optional branch protection rule enforcement.
+    environment: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_BACKEND_BUCKET }}" \
+            -backend-config="key=envs/staging/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -input=false
+
+      # Pass the exact SHA-tagged image so Terraform replaces the ECS task
+      # definition container image atomically and the state reflects reality.
+      - name: Terraform apply — staging
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform apply \
+            -var-file=staging.tfvars \
+            -var="container_image=${{ needs.build.outputs.image }}" \
+            -auto-approve \
+            -input=false
+
+  # ── 4. Deploy to production (manual approve gate) ─────────────────────────
+  deploy-prod:
+    name: Deploy → production
+    runs-on: ubuntu-latest
+    # Requires staging to be healthy before prod is ever touched.
+    needs: [build, deploy-staging]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    # "production" environment must have Required Reviewers configured in
+    # Settings → Environments → production so a human must click Approve
+    # before this job is allowed to start.
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_BACKEND_BUCKET }}" \
+            -backend-config="key=envs/prod/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -input=false
+
+      # Same image SHA that was validated in staging — prod never pulls an
+      # image that wasn't already exercised by the staging health checks.
+      - name: Terraform apply — production
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform apply \
+            -var-file=prod.tfvars \
+            -var="container_image=${{ needs.build.outputs.image }}" \
+            -auto-approve \
+            -input=false
