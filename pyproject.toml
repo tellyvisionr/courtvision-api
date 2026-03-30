@@ -11,6 +11,11 @@ select = ["E", "F", "W", "I", "UP", "B", "C4"]
 # E501 line-length is enforced by Black, not Ruff
 ignore = ["E501"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency injection works by calling Depends() in default argument
+# position — this is intentional and not the bug B008 is designed to catch.
+extend-immutable-calls = ["Depends", "fastapi.Depends"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 force-sort-within-sections = true

@@ -23,9 +23,13 @@ class BallDontLieClient:
         base_url: str | None = None,
         api_key: str | None = None,
     ) -> None:
-        self.base_url = (
-            base_url or os.getenv("BALLDONTLIE_BASE_URL", "https://api.balldontlie.io/v1")
-        ).rstrip("/")
+        # Explicit conditional instead of `or` so mypy can narrow str | None → str.
+        resolved_url = (
+            base_url
+            if base_url is not None
+            else os.getenv("BALLDONTLIE_BASE_URL", "https://api.balldontlie.io/v1")
+        )
+        self.base_url = resolved_url.rstrip("/")
         self.api_key = api_key or os.getenv("BALLDONTLIE_API_KEY", "")
         self._client: httpx.AsyncClient | None = None
 
@@ -59,9 +63,7 @@ class BallDontLieClient:
         data = await self._get("/players", {"search": name})
         return PlayerSearchResponse(**data)
 
-    async def get_season_averages(
-        self, player_id: int, season: int
-    ) -> SeasonAveragesResponse:
+    async def get_season_averages(self, player_id: int, season: int) -> SeasonAveragesResponse:
         """Fetch season averages for a single player."""
         data = await self._get(
             "/season_averages",

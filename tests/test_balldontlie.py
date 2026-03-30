@@ -5,15 +5,16 @@ Mocked tests use respx to intercept httpx calls — no real network traffic.
 Integration tests (marked with @pytest.mark.integration) hit the live API
 and are skipped automatically when BALLDONTLIE_API_KEY is not a real key.
 """
+
 from __future__ import annotations
 
 import os
 from unittest.mock import AsyncMock
 
 import httpx
+from httpx import ASGITransport, AsyncClient, Response
 import pytest
 import respx
-from httpx import AsyncClient, ASGITransport, Response
 
 from app.clients.balldontlie import BallDontLieClient
 from app.main import app, get_bdl_client
@@ -129,6 +130,7 @@ AVERAGES_EMPTY = {"data": []}
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _client() -> AsyncClient:
     """Return an AsyncClient wired to the FastAPI test app."""
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
@@ -176,9 +178,7 @@ async def test_search_players_http_error_bubbles():
 
 async def test_get_season_averages_returns_model():
     async with respx.mock:
-        respx.get(f"{BASE}/season_averages").mock(
-            return_value=Response(200, json=AVERAGES_LEBRON)
-        )
+        respx.get(f"{BASE}/season_averages").mock(return_value=Response(200, json=AVERAGES_LEBRON))
         async with BallDontLieClient(api_key="test") as client:
             result = await client.get_season_averages(player_id=237, season=2023)
 
@@ -191,9 +191,7 @@ async def test_get_season_averages_returns_model():
 
 async def test_get_season_averages_empty():
     async with respx.mock:
-        respx.get(f"{BASE}/season_averages").mock(
-            return_value=Response(200, json=AVERAGES_EMPTY)
-        )
+        respx.get(f"{BASE}/season_averages").mock(return_value=Response(200, json=AVERAGES_EMPTY))
         async with BallDontLieClient(api_key="test") as client:
             result = await client.get_season_averages(player_id=999, season=2000)
 
@@ -288,9 +286,7 @@ async def test_endpoint_players_search_upstream_error():
 
 async def test_endpoint_season_averages_success():
     async with respx.mock:
-        respx.get(f"{BASE}/season_averages").mock(
-            return_value=Response(200, json=AVERAGES_LEBRON)
-        )
+        respx.get(f"{BASE}/season_averages").mock(return_value=Response(200, json=AVERAGES_LEBRON))
         async with _client() as ac:
             r = await ac.get("/players/237/season-averages", params={"season": 2023})
 
@@ -389,9 +385,7 @@ async def test_endpoint_compare_no_averages_returns_none_fields():
             Response(200, json=SEARCH_LEBRON),
             Response(200, json=SEARCH_CURRY),
         ]
-        respx.get(f"{BASE}/season_averages").mock(
-            return_value=Response(200, json=AVERAGES_EMPTY)
-        )
+        respx.get(f"{BASE}/season_averages").mock(return_value=Response(200, json=AVERAGES_EMPTY))
         async with _client() as ac:
             r = await ac.get(
                 "/compare",
@@ -413,6 +407,7 @@ async def test_endpoint_compare_missing_params():
 # ===========================================================================
 # Error-branch coverage via dependency override (no retry delay)
 # ===========================================================================
+
 
 def _override(exc: Exception):
     """Return a get_bdl_client override whose methods all raise *exc*."""
@@ -461,7 +456,7 @@ async def test_endpoint_compare_503_on_search_transport_error():
 
 async def test_endpoint_compare_503_on_averages_transport_error():
     """TransportError raised only during get_season_averages (after search succeeds)."""
-    from app.models import PlayerSearchResponse, Player
+    from app.models import Player, PlayerSearchResponse
 
     mock = AsyncMock(spec=BallDontLieClient)
     mock.search_players.return_value = PlayerSearchResponse(
@@ -504,9 +499,17 @@ async def test_legacy_players_endpoint():
 
 async def test_legacy_teams_endpoint():
     teams_payload = {
-        "data": [{"id": 14, "name": "Lakers", "full_name": "Los Angeles Lakers",
-                  "abbreviation": "LAL", "city": "Los Angeles",
-                  "conference": "West", "division": "Pacific"}],
+        "data": [
+            {
+                "id": 14,
+                "name": "Lakers",
+                "full_name": "Los Angeles Lakers",
+                "abbreviation": "LAL",
+                "city": "Los Angeles",
+                "conference": "West",
+                "division": "Pacific",
+            }
+        ],
         "meta": {},
     }
     async with respx.mock:

@@ -7,12 +7,12 @@ Built with **FastAPI**, containerized with **Docker**, provisioned with **Terraf
 ---
 
 ## 🚀 Key Features
-- **FastAPI backend** serving live NBA data from the [balldontlie.io](https://www.balldontlie.io) API  
-- **Containerized** application (Docker) for consistent environment parity  
-- **Automated CI/CD pipeline** using GitHub Actions to test, build, and deploy on every push  
-- **Infrastructure as Code (IaC)** using Terraform to provision ECS, ALB, and networking  
-- **Cloud-native deployment** on AWS Fargate (serverless containers)  
-- **Health checks & observability** via ALB target group monitoring and CloudWatch logs  
+- **FastAPI backend** serving live NBA data from the [balldontlie.io](https://www.balldontlie.io) API
+- **Containerized** application (Docker) for consistent environment parity
+- **Automated CI/CD pipeline** using GitHub Actions to test, build, and deploy on every push
+- **Infrastructure as Code (IaC)** using Terraform to provision ECS, ALB, and networking
+- **Cloud-native deployment** on AWS Fargate (serverless containers)
+- **Health checks & observability** via ALB target group monitoring and CloudWatch logs
 
 ---
 

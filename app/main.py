@@ -1,10 +1,11 @@
 # app/main.py
 
-from fastapi import FastAPI, HTTPException, Depends, Query
-from pathlib import Path
 import os
-import httpx
+from pathlib import Path
+
 from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Query
+import httpx
 
 from app.clients.balldontlie import BallDontLieClient
 from app.models import (
@@ -27,6 +28,7 @@ if not BALLDONTLIE_API_KEY:
 # --- App ---
 app = FastAPI(title="Courtvision API", version="0.1.0")
 
+
 # --- Upstream helper (legacy) ---
 async def fetch_from_balldontlie(endpoint: str, params: dict | None = None):
     headers = {"Authorization": f"Bearer {BALLDONTLIE_API_KEY}"}
@@ -38,9 +40,9 @@ async def fetch_from_balldontlie(endpoint: str, params: dict | None = None):
             return resp.json()
         except httpx.HTTPStatusError as e:
             # Bubble up upstream status to the client for transparency
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}") from e
 
 
 # --- Dependency ---
@@ -68,9 +70,9 @@ async def search_players(
     try:
         return await client.search_players(name)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
-        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}")
+        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
 
 @app.get(
@@ -87,9 +89,9 @@ async def get_season_averages(
     try:
         return await client.get_season_averages(player_id, season)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
-        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}")
+        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
 
 @app.get(
@@ -107,9 +109,9 @@ async def compare_players(
     try:
         r1, r2 = await client.search_players(player1), await client.search_players(player2)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
-        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}")
+        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
     if not r1.data:
         raise HTTPException(status_code=404, detail=f"Player not found: {player1!r}")
@@ -120,9 +122,9 @@ async def compare_players(
         avg1 = await client.get_season_averages(r1.data[0].id, season)
         avg2 = await client.get_season_averages(r2.data[0].id, season)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
-        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}")
+        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
     return CompareResponse(
         player1=avg1.data[0] if avg1.data else None,
