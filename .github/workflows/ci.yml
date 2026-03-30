@@ -1,24 +1,33 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # CourtVision API — Continuous Integration
 #
-# Runs on every push and pull request.  Gates that must pass before cd.yml
-# is allowed to promote anything to an environment:
+# Trigger strategy
+# ────────────────
+# CI runs on *every* branch push and on every pull request so issues are
+# caught as early as possible — on the feature branch itself, not only after
+# the merge.  Running again on main after a merge acts as a safety net in
+# case the merge introduced a conflict that wasn't caught locally.
 #
+# CD (build → ECR push → ECS deploy) lives in cd.yml and only fires on main,
+# so feature branch pushes never touch production infrastructure.
+#
+# Gates enforced here:
 #   lint  → Black (formatting), Ruff (linting + isort), mypy (type-check)
 #   test  → pytest: unit tests, endpoint tests, integration tests (skipped
 #            unless a real API key is present), coverage ≥ 85 %
 #
-# No AWS credentials are needed here — this workflow is deliberately
-# scoped to code quality and never touches external infrastructure.
-#
+# No AWS credentials needed — this workflow never touches infrastructure.
 # Required secrets / variables: none (test key is a sentinel value).
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI
 
 on:
+  # Run on every push to every branch so feature branches get feedback
+  # immediately, without waiting for a PR to be opened.
   push:
-    branches: [main]
+  # Also run on PRs to catch any issues introduced by the merge itself
+  # and to populate PR status checks used by branch-protection rules.
   pull_request:
 
 # Default every job to read-only; escalate only where explicitly needed.

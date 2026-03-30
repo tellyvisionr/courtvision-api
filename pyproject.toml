@@ -36,6 +36,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Add the project root to sys.path so `import app` resolves in CI
+# (the runner's working directory is not on sys.path by default).
+pythonpath = ["."]
 markers = [
     "integration: marks tests as integration tests (require real API key)",
 ]
