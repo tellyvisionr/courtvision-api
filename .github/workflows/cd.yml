@@ -1,101 +1,45 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # CourtVision API — Continuous Delivery
 #
-# Trigger strategy
-# ────────────────
-# CD fires ONLY on pushes to main (i.e. after a PR is merged).
-# Feature branch pushes never trigger a build, ECR push, or ECS deploy.
-# This keeps production infrastructure changes tied to reviewed, merged code.
+# Trigger: pushes to main only (after a PR is merged).
 #
-# The complementary ci.yml runs on every branch push + PR for fast feedback.
-# Branch protection on main should require ci.yml to pass before merging.
-#
-# Pipeline topology (main push only)
-# ───────────────────────────────────
-#
-#   push to main
-#       │
-#       ├─ build ──────────────────────────────────────────────────────────┐
-#       │   build → push to ECR with :<sha> and :latest tags               │
-#       │   exports image URI as job output                                 │
-#       │                                                                   │
-#       ├─ tf-plan  (skipped — only meaningful on PRs, handled in ci.yml)  │
-#       │                                                                   │
-#       └─ deploy-staging  (needs: build) ──────────────────────────────── ┤
-#           terraform apply staging.tfvars                                  │
-#                                                                   waits  │
-#       └─ deploy-prod  (needs: build + deploy-staging) ────────────────── ┘
-#           GitHub Environment "production" → manual approval gate
-#           terraform apply prod.tfvars
-#
-# Terraform layout assumed
-# ────────────────────────
-#   infra/
-#     main.tf            ECS cluster, Fargate service, ALB, VPC, CW logs
-#     variables.tf       includes var "container_image" used at deploy time
-#     outputs.tf
-#     backend.tf         empty S3 backend block — credentials injected by CI
-#     staging.tfvars     staging-specific values (instance sizes, subnets…)
-#     prod.tfvars        production-specific values
+# Currently: builds the Docker image and pushes it to ECR.
+# Terraform deploy jobs (staging, prod) are intentionally omitted for now.
+# Add them back once the infrastructure is validated manually via
+# `terraform apply` from a local machine.
 #
 # Required GitHub Secrets  (Settings → Secrets and variables → Actions)
-#   AWS_ACCESS_KEY_ID        IAM key — ECR push + ECS + Terraform state rights
+#   AWS_ACCESS_KEY_ID        IAM key with ECR push rights
 #   AWS_SECRET_ACCESS_KEY    Corresponding secret key
 #
 # Required GitHub Variables (Settings → Secrets and variables → Variables)
 #   AWS_REGION               Target region, e.g. us-east-1
 #   ECR_REPOSITORY           ECR repo name,  e.g. courtvision-api
-#   TF_BACKEND_BUCKET        S3 bucket that holds Terraform state files
-#
-# GitHub Environments needed (Settings → Environments)
-#   staging    — no approval gate; auto-deploys on every merge to main
-#   production — add required reviewers for the manual-approve gate
-#
-# OIDC note
-# ─────────
-# The workflows below use long-lived IAM keys for now (simplest to bootstrap).
-# Once your Terraform provisions an IAM OIDC provider you can swap to:
-#   role-to-assume: arn:aws:iam::<acct>:role/github-actions-courtvision
-# in aws-actions/configure-aws-credentials — no other changes required.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CD
 
 on:
-  # CD runs exclusively on main — only reviewed, merged code reaches
-  # ECR and ECS.  Feature branch pushes and open PRs never deploy.
   push:
     branches: [main]
 
-# Read-only by default; individual jobs escalate only what they need.
 permissions:
   contents: read
 
 env:
-  PYTHON_VERSION:   "3.13"
-  TF_VERSION:       "~1.9"
-  TF_DIR:           infra
-  AWS_REGION:       ${{ vars.AWS_REGION       || 'us-east-1' }}
-  ECR_REPOSITORY:   ${{ vars.ECR_REPOSITORY   || 'courtvision-api' }}
+  AWS_REGION:     ${{ vars.AWS_REGION     || 'us-east-1' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'courtvision-api' }}
 
-# ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
-  # ── 1. Docker build & push to ECR ───────────────────────────────────────────
-  # This job always runs — the workflow trigger already constrains it to main.
-  # Note: Dockerfile validation on PRs is handled by ci.yml (docker build,
-  # no push).  The Terraform plan (tf-plan) will be added to ci.yml once the
-  # infra/ directory is created; it has no place in cd.yml.
   build:
     name: Docker build & push
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
-      id-token: write   # reserved — will be needed when switching to OIDC
+      id-token: write   # reserved for future OIDC switch
 
-    # Export the exact image URI so downstream deploy jobs pin the immutable
-    # SHA digest rather than the rolling :latest tag.
     outputs:
       image: ${{ steps.set-image.outputs.image }}
 
@@ -121,8 +65,8 @@ jobs:
         with:
           context: .
           push: true
-          # :<sha>   — immutable ref used to pin the exact image in Terraform
-          # :latest  — rolling convenience tag for local pulls / smoke tests
+          # :<sha>   — immutable ref pinned in Terraform
+          # :latest  — rolling tag for local pulls / smoke tests
           tags: |
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
@@ -134,106 +78,3 @@ jobs:
         run: |
           echo "image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
             >> "$GITHUB_OUTPUT"
-
-  # ── 2. Deploy to staging ──────────────────────────────────────────────────
-  deploy-staging:
-    name: Deploy → staging
-    runs-on: ubuntu-latest
-    needs: [build]
-    # No extra if: guard needed — the workflow trigger already enforces
-    # that only main-branch pushes reach this point.
-
-    permissions:
-      contents: read
-      id-token: write
-
-    # Tracks deployment history in the GitHub UI and can enforce
-    # branch-protection wait timers if configured.
-    environment: staging
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
-
-      - name: Terraform init
-        working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_BACKEND_BUCKET }}" \
-            -backend-config="key=envs/staging/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -input=false
-
-      # Pass the exact SHA-tagged image so Terraform replaces the ECS task
-      # definition container image atomically and the state reflects reality.
-      - name: Terraform apply — staging
-        working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform apply \
-            -var-file=staging.tfvars \
-            -var="container_image=${{ needs.build.outputs.image }}" \
-            -auto-approve \
-            -input=false
-
-  # ── 3. Deploy to production (manual approve gate) ────────────────────────
-  deploy-prod:
-    name: Deploy → production
-    runs-on: ubuntu-latest
-    # Staging must be healthy before prod is ever touched.
-    needs: [build, deploy-staging]
-    # No extra if: guard — workflow trigger constrains to main push only.
-
-    permissions:
-      contents: read
-      id-token: write
-
-    # "production" environment must have Required Reviewers configured in
-    # Settings → Environments → production so a human must click Approve
-    # before this job is allowed to start.
-    environment: production
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
-
-      - name: Terraform init
-        working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_BACKEND_BUCKET }}" \
-            -backend-config="key=envs/prod/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -input=false
-
-      # Same image SHA that was validated in staging — prod never pulls an
-      # image that wasn't already exercised by the staging health checks.
-      - name: Terraform apply — production
-        working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform apply \
-            -var-file=prod.tfvars \
-            -var="container_image=${{ needs.build.outputs.image }}" \
-            -auto-approve \
-            -input=false
