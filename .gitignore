@@ -27,3 +27,10 @@ Thumbs.db
 
 # other
 .claude
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+.terraform.lock.hcl
