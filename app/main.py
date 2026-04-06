@@ -1,5 +1,6 @@
 # app/main.py
 
+from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 
@@ -8,6 +9,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 import httpx
 
 from app.clients.balldontlie import BallDontLieClient
+from app.db import crud
+from app.db.database import engine, get_session
+from app.db.models import Base
 from app.models import (
     CompareResponse,
     ErrorResponse,
@@ -25,8 +29,21 @@ BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL", "https://api.balldontli
 if not BALLDONTLIE_API_KEY:
     raise RuntimeError("Missing BALLDONTLIE_API_KEY environment variable")
 
+
+# --- Lifespan: create DB tables on startup ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        # DB unavailable (e.g. CI, local dev without postgres) — start anyway.
+        pass
+    yield
+
+
 # --- App ---
-app = FastAPI(title="Courtvision API", version="0.1.0")
+app = FastAPI(title="Courtvision API", version="0.1.0", lifespan=lifespan)
 
 
 # --- Upstream helper (legacy) ---
@@ -65,14 +82,21 @@ async def health():
 async def search_players(
     name: str = Query(..., description="Player name to search for"),
     client: BallDontLieClient = Depends(get_bdl_client),
+    session=Depends(get_session),
 ):
-    """Search for players by name."""
+    """Search for players by name and persist results to the database."""
     try:
-        return await client.search_players(name)
+        result = await client.search_players(name)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
+
+    for player in result.data:
+        await crud.upsert_player(session, player)
+    await session.commit()
+
+    return result
 
 
 @app.get(
@@ -84,14 +108,21 @@ async def get_season_averages(
     player_id: int,
     season: int = Query(..., description="NBA season year, e.g. 2023"),
     client: BallDontLieClient = Depends(get_bdl_client),
+    session=Depends(get_session),
 ):
-    """Get season averages for a player."""
+    """Get season averages for a player and persist results to the database."""
     try:
-        return await client.get_season_averages(player_id, season)
+        result = await client.get_season_averages(player_id, season)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
+
+    for avg in result.data:
+        await crud.upsert_season_average(session, avg)
+    await session.commit()
+
+    return result
 
 
 @app.get(
