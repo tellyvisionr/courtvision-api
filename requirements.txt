@@ -6,6 +6,9 @@ python-dotenv
 pydantic
 tenacity
 requests
+sqlalchemy[asyncio]
+asyncpg
+alembic
 
 # Dev / CI
 pytest
