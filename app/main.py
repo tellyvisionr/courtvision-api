@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 import httpx
 
 from app.clients.balldontlie import BallDontLieClient
-from app.db.database import AsyncSessionLocal, engine, get_session
+from app.db.database import engine, get_session
 from app.db.models import Base
 from app.db import crud
 from app.models import (
@@ -33,8 +33,12 @@ if not BALLDONTLIE_API_KEY:
 # --- Lifespan: create DB tables on startup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        # DB unavailable (e.g. CI, local dev without postgres) — start anyway.
+        pass
     yield
 
 
