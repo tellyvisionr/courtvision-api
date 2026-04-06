@@ -1,7 +1,7 @@
 # app/main.py
 
-import os
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -9,9 +9,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 import httpx
 
 from app.clients.balldontlie import BallDontLieClient
+from app.db import crud
 from app.db.database import engine, get_session
 from app.db.models import Base
-from app.db import crud
 from app.models import (
     CompareResponse,
     ErrorResponse,
