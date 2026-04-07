@@ -3,18 +3,25 @@
 #
 # Trigger: pushes to main only (after a PR is merged).
 #
-# Currently: builds the Docker image and pushes it to ECR.
-# Terraform deploy jobs (staging, prod) are intentionally omitted for now.
-# Add them back once the infrastructure is validated manually via
-# `terraform apply` from a local machine.
+# Pipeline topology
+# ─────────────────
+#   push to main
+#       │
+#       └─ build  — build image, push to ECR with :<sha> and :latest tags
+#           │
+#           └─ deploy — force new ECS deployment, wait for stability,
+#                       smoke-test the /health endpoint
 #
 # Required GitHub Secrets  (Settings → Secrets and variables → Actions)
-#   AWS_ACCESS_KEY_ID        IAM key with ECR push rights
+#   AWS_ACCESS_KEY_ID        IAM key with ECR push + ECS deploy rights
 #   AWS_SECRET_ACCESS_KEY    Corresponding secret key
 #
 # Required GitHub Variables (Settings → Secrets and variables → Variables)
 #   AWS_REGION               Target region, e.g. us-east-1
 #   ECR_REPOSITORY           ECR repo name,  e.g. courtvision-api
+#   ECS_CLUSTER              ECS cluster name, e.g. courtvision-cluster
+#   ECS_SERVICE              ECS service name, e.g. courtvision-service
+#   ALB_DNS_NAME             Public ALB DNS — used for post-deploy smoke test
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CD
@@ -29,11 +36,14 @@ permissions:
 env:
   AWS_REGION:     ${{ vars.AWS_REGION     || 'us-east-1' }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'courtvision-api' }}
+  ECS_CLUSTER:    ${{ vars.ECS_CLUSTER    || 'courtvision-cluster' }}
+  ECS_SERVICE:    ${{ vars.ECS_SERVICE    || 'courtvision-service' }}
 
 jobs:
 
+  # ── 1. Build & push ────────────────────────────────────────────────────────
   build:
-    name: Docker build & push
+    name: Build & push image
     runs-on: ubuntu-latest
 
     permissions:
@@ -65,8 +75,8 @@ jobs:
         with:
           context: .
           push: true
-          # :<sha>   — immutable ref pinned in Terraform
-          # :latest  — rolling tag for local pulls / smoke tests
+          # :<sha>   — immutable, used to pin the exact image in deployments
+          # :latest  — rolling tag for local pulls and smoke tests
           tags: |
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
@@ -78,3 +88,62 @@ jobs:
         run: |
           echo "image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
             >> "$GITHUB_OUTPUT"
+
+  # ── 2. Deploy to ECS ───────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build
+
+    permissions:
+      contents: read
+      id-token: write
+
+    # Uncomment once you've created a "production" environment in
+    # Settings → Environments and added required reviewers for an
+    # approval gate before every production deploy.
+    # environment: production
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      # Update the ECS service to use the new image SHA via a forced
+      # redeployment. ECS will start new tasks before draining the old ones,
+      # ensuring zero-downtime rollout.
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --service "${{ env.ECS_SERVICE }}" \
+            --force-new-deployment \
+            --region "${{ env.AWS_REGION }}"
+
+      # Block until ECS reports the service as stable (all desired tasks
+      # running and passing health checks). Fails the job — and prevents
+      # the smoke test — if stability isn't reached within ~10 minutes.
+      - name: Wait for service stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --services "${{ env.ECS_SERVICE }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # Confirm the deployed service is healthy end-to-end by hitting the
+      # /health endpoint through the load balancer. A non-200 response or
+      # connection failure fails the job so the team is alerted immediately.
+      - name: Smoke test — /health
+        run: |
+          URL="http://${{ vars.ALB_DNS_NAME }}/health"
+          echo "GET $URL"
+          STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" --max-time 10 "$URL")
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Smoke test failed — expected 200, got $STATUS"
+            exit 1
+          fi
+          echo "Smoke test passed."
