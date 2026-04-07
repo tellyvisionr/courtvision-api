@@ -38,6 +38,7 @@ env:
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'courtvision-api' }}
   ECS_CLUSTER:    ${{ vars.ECS_CLUSTER    || 'courtvision-cluster' }}
   ECS_SERVICE:    ${{ vars.ECS_SERVICE    || 'courtvision-service' }}
+  ALB_DNS_NAME:   ${{ vars.ALB_DNS_NAME }}
 
 jobs:
 
@@ -138,7 +139,7 @@ jobs:
       # connection failure fails the job so the team is alerted immediately.
       - name: Smoke test — /health
         run: |
-          URL="http://${{ vars.ALB_DNS_NAME }}/health"
+          URL="http://${{ env.ALB_DNS_NAME }}/health"
           echo "GET $URL"
           STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" --max-time 10 "$URL")
           echo "HTTP status: $STATUS"
