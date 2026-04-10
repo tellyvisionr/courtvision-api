@@ -18,6 +18,7 @@ from app.models import (
     PlayerSearchResponse,
     SeasonAveragesResponse,
 )
+from app.services import ingest
 
 # --- Config / Env ---
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,22 +45,6 @@ async def lifespan(app: FastAPI):
 
 # --- App ---
 app = FastAPI(title="Courtvision API", version="0.1.0", lifespan=lifespan)
-
-
-# --- Upstream helper (legacy) ---
-async def fetch_from_balldontlie(endpoint: str, params: dict | None = None):
-    headers = {"Authorization": f"Bearer {BALLDONTLIE_API_KEY}"}
-    url = f"{BALLDONTLIE_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            resp = await client.get(url, headers=headers, params=params)
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPStatusError as e:
-            # Bubble up upstream status to the client for transparency
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}") from e
 
 
 # --- Dependency ---
@@ -163,16 +148,22 @@ async def compare_players(
     )
 
 
-# --- Legacy routes ---
-@app.get("/players/{player_name}")
-async def get_player(player_name: str):
-    """Search players by name (legacy)."""
-    data = await fetch_from_balldontlie("players", {"search": player_name})
-    return data
+@app.post(
+    "/ingest/{season}",
+    responses={503: {"model": ErrorResponse}},
+)
+async def ingest_season_data(
+    season: int,
+    client: BallDontLieClient = Depends(get_bdl_client),
+    session=Depends(get_session),
+):
+    """Bulk ingest all teams, games, and player box scores for a season.
 
-
-@app.get("/teams/{team_name}")
-async def get_teams(team_name: str):
-    """Search team by name."""
-    data = await fetch_from_balldontlie("teams", {"search": team_name})
-    return data
+    Long-running — intended for manual invocation, not latency-sensitive paths.
+    Returns a summary of how many rows were written.
+    """
+    try:
+        summary = await ingest.ingest_season(client, session, season)
+    except httpx.TransportError as e:
+        raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
+    return summary

@@ -483,45 +483,6 @@ async def test_endpoint_compare_503_on_averages_transport_error():
 
 
 # ===========================================================================
-# Legacy route coverage
-# ===========================================================================
-
-
-async def test_legacy_players_endpoint():
-    async with respx.mock:
-        respx.get(f"{BASE}/players").mock(return_value=Response(200, json=SEARCH_LEBRON))
-        async with _client() as ac:
-            r = await ac.get("/players/LeBron")
-
-    assert r.status_code == 200
-    assert r.json()["data"][0]["id"] == 237
-
-
-async def test_legacy_teams_endpoint():
-    teams_payload = {
-        "data": [
-            {
-                "id": 14,
-                "name": "Lakers",
-                "full_name": "Los Angeles Lakers",
-                "abbreviation": "LAL",
-                "city": "Los Angeles",
-                "conference": "West",
-                "division": "Pacific",
-            }
-        ],
-        "meta": {},
-    }
-    async with respx.mock:
-        respx.get(f"{BASE}/teams").mock(return_value=Response(200, json=teams_payload))
-        async with _client() as ac:
-            r = await ac.get("/teams/Lakers")
-
-    assert r.status_code == 200
-    assert r.json()["data"][0]["abbreviation"] == "LAL"
-
-
-# ===========================================================================
 # /health
 # ===========================================================================
 
