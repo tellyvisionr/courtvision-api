@@ -70,3 +70,39 @@ class BallDontLieClient:
             {"season": season, "player_ids[]": player_id},
         )
         return SeasonAveragesResponse(**data)
+
+    async def get_all_teams(self) -> list[dict]:
+        """Fetch all 30 NBA teams (single page, no pagination)."""
+        data = await self._get("/teams")
+        return data["data"]
+
+    async def get_games(
+        self,
+        season: int,
+        cursor: int | None = None,
+        per_page: int = 100,
+    ) -> dict:
+        """Fetch games for a season with cursor-based pagination.
+
+        Returns the raw API response dict containing 'data' and 'meta'
+        so callers can follow the cursor themselves.
+        """
+        params: dict = {"seasons[]": season, "per_page": per_page}
+        if cursor is not None:
+            params["cursor"] = cursor
+        return await self._get("/games", params)
+
+    async def get_game_stats(
+        self,
+        game_id: int,
+        cursor: int | None = None,
+        per_page: int = 100,
+    ) -> dict:
+        """Fetch player box score stats for a specific game.
+
+        Returns the raw API response dict containing 'data' and 'meta'.
+        """
+        params: dict = {"game_ids[]": game_id, "per_page": per_page}
+        if cursor is not None:
+            params["cursor"] = cursor
+        return await self._get("/stats", params)

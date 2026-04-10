@@ -51,6 +51,47 @@ class SeasonAverage(BaseModel):
     ft_pct: float | None = None
 
 
+class Game(BaseModel):
+    id: int
+    date: str
+    season: int
+    status: str | None = None
+    postseason: bool | None = None
+    home_team_score: int | None = None
+    visitor_team_score: int | None = None
+    home_team: Team
+    visitor_team: Team
+
+
+class GameStats(BaseModel):
+    """Single player's box score for one game."""
+
+    id: int
+    player: Player
+    team: Team
+    game: Game
+    min: str | None = None
+    pts: int | None = None
+    ast: int | None = None
+    reb: int | None = None
+    oreb: int | None = None
+    dreb: int | None = None
+    stl: int | None = None
+    blk: int | None = None
+    turnover: int | None = None
+    pf: int | None = None
+    plus_minus: int | None = None
+    fgm: int | None = None
+    fga: int | None = None
+    fg_pct: float | None = None
+    fg3m: int | None = None
+    fg3a: int | None = None
+    fg3_pct: float | None = None
+    ftm: int | None = None
+    fta: int | None = None
+    ft_pct: float | None = None
+
+
 class PlayerSearchResponse(BaseModel):
     data: list[Player]
 
