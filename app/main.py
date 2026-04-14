@@ -1,6 +1,7 @@
 # app/main.py
 
 from contextlib import asynccontextmanager
+import logging
 import os
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from app.clients.balldontlie import BallDontLieClient
 from app.db import crud
 from app.db.database import engine, get_session
 from app.db.models import Base
+from app.logging_config import setup_logging
+from app.middleware import AccessLogMiddleware, RequestIDMiddleware
 from app.models import (
     CompareResponse,
     ErrorResponse,
@@ -30,6 +33,10 @@ BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL", "https://api.balldontli
 if not BALLDONTLIE_API_KEY:
     raise RuntimeError("Missing BALLDONTLIE_API_KEY environment variable")
 
+setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+
+logger = logging.getLogger(__name__)
+
 
 # --- Lifespan: create DB tables on startup ---
 @asynccontextmanager
@@ -37,14 +44,19 @@ async def lifespan(app: FastAPI):
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables verified")
     except Exception:
         # DB unavailable (e.g. CI, local dev without postgres) — start anyway.
-        pass
+        logger.warning("Database unavailable — starting without persistence")
     yield
 
 
 # --- App ---
 app = FastAPI(title="Courtvision API", version="0.1.0", lifespan=lifespan)
+
+# Middleware: add AccessLog first so RequestID runs first (Starlette reverses order).
+app.add_middleware(AccessLogMiddleware)
+app.add_middleware(RequestIDMiddleware)
 
 
 # --- Dependency ---
@@ -73,13 +85,16 @@ async def search_players(
     try:
         result = await client.search_players(name)
     except httpx.HTTPStatusError as e:
+        logger.warning("Upstream HTTP %d during player search %r", e.response.status_code, name)
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
+        logger.warning("Transport error during player search: %s", e)
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
     for player in result.data:
         await crud.upsert_player(session, player)
     await session.commit()
+    logger.info("Persisted %d players for query %r", len(result.data), name)
 
     return result
 
@@ -99,8 +114,12 @@ async def get_season_averages(
     try:
         result = await client.get_season_averages(player_id, season)
     except httpx.HTTPStatusError as e:
+        logger.warning(
+            "Upstream HTTP %d for player %d season averages", e.response.status_code, player_id
+        )
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
+        logger.warning("Transport error fetching season averages: %s", e)
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
     for avg in result.data:
@@ -125,8 +144,10 @@ async def compare_players(
     try:
         r1, r2 = await client.search_players(player1), await client.search_players(player2)
     except httpx.HTTPStatusError as e:
+        logger.warning("Upstream HTTP %d during compare search", e.response.status_code)
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
+        logger.warning("Transport error during compare: %s", e)
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
     if not r1.data:
@@ -138,8 +159,10 @@ async def compare_players(
         avg1 = await client.get_season_averages(r1.data[0].id, season)
         avg2 = await client.get_season_averages(r2.data[0].id, season)
     except httpx.HTTPStatusError as e:
+        logger.warning("Upstream HTTP %d fetching compare averages", e.response.status_code)
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
+        logger.warning("Transport error fetching compare averages: %s", e)
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
 
     return CompareResponse(
@@ -162,10 +185,13 @@ async def ingest_season_data(
     Long-running — intended for manual invocation, not latency-sensitive paths.
     Returns a summary of how many rows were written.
     """
+    logger.info("Starting season %d ingestion", season)
     try:
         summary = await ingest.ingest_season(client, session, season)
     except httpx.TransportError as e:
+        logger.warning("Transport error during ingestion: %s", e)
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
+    logger.info("Completed season %d ingestion: %s", season, summary)
     return summary
 
 
@@ -185,7 +211,19 @@ async def predict_player(
     """
     result = await predict.predict_player_game(session, player_id, opponent_team_id)
     if "error" in result:
+        logger.info(
+            "Insufficient data for player %d vs team %d: %s",
+            player_id,
+            opponent_team_id,
+            result.get("error"),
+        )
         raise HTTPException(status_code=400, detail=result)
+    logger.info(
+        "Player %d prediction vs team %d: pts=%.1f",
+        player_id,
+        opponent_team_id,
+        result["predicted_pts"],
+    )
     return result
 
 
@@ -205,5 +243,17 @@ async def predict_game(
     """
     result = await predict.predict_game_outcome(session, home_team_id, away_team_id)
     if "error" in result:
+        logger.info(
+            "Insufficient data for game %d vs %d: %s",
+            home_team_id,
+            away_team_id,
+            result.get("error"),
+        )
         raise HTTPException(status_code=400, detail=result)
+    logger.info(
+        "Game prediction %d vs %d: home_win=%.3f",
+        home_team_id,
+        away_team_id,
+        result["home_win_probability"],
+    )
     return result
