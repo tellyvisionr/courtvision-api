@@ -5,9 +5,10 @@ the database without creating duplicates. Callers are responsible for
 committing the session.
 """
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db.models import GameRow, GameStatsRow, PlayerRow, SeasonAverageRow, TeamRow
 from app.models import Game, GameStats, Player, SeasonAverage, Team
@@ -231,5 +232,56 @@ async def get_season_averages_for_player(
         select(SeasonAverageRow)
         .where(SeasonAverageRow.player_id == player_id)
         .order_by(SeasonAverageRow.season)
+    )
+    return list(result.scalars().all())
+
+
+async def get_player_game_stats(
+    session: AsyncSession,
+    player_id: int,
+) -> list[GameStatsRow]:
+    """Return all game stats for a player ordered by game date.
+
+    Eagerly loads the game relationship so callers can access
+    game.home_team_id and game.visitor_team_id without extra queries.
+    """
+    result = await session.execute(
+        select(GameStatsRow)
+        .where(GameStatsRow.player_id == player_id)
+        .join(GameRow, GameStatsRow.game_id == GameRow.id)
+        .order_by(GameRow.date)
+        .options(selectinload(GameStatsRow.game))
+    )
+    return list(result.scalars().all())
+
+
+async def get_team_games(
+    session: AsyncSession,
+    team_id: int,
+) -> list[GameRow]:
+    """Return all games involving a team (home or away), ordered by date."""
+    result = await session.execute(
+        select(GameRow)
+        .where(or_(GameRow.home_team_id == team_id, GameRow.visitor_team_id == team_id))
+        .order_by(GameRow.date)
+    )
+    return list(result.scalars().all())
+
+
+async def get_head_to_head_games(
+    session: AsyncSession,
+    team_a_id: int,
+    team_b_id: int,
+) -> list[GameRow]:
+    """Return all games between two specific teams, ordered by date."""
+    result = await session.execute(
+        select(GameRow)
+        .where(
+            or_(
+                (GameRow.home_team_id == team_a_id) & (GameRow.visitor_team_id == team_b_id),
+                (GameRow.home_team_id == team_b_id) & (GameRow.visitor_team_id == team_a_id),
+            )
+        )
+        .order_by(GameRow.date)
     )
     return list(result.scalars().all())
