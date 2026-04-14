@@ -98,7 +98,7 @@ pytest --cov=app -v
 
 ## Architecture
 
-(courtvision-apiflow.png)
+[Architecture](docs/courtvision-apiflow.png)
 
 Infrastructure is provisioned via Terraform under `terraform/`. See `terraform/terraform.tfvars` for required input variables before applying.
 
