@@ -13,10 +13,12 @@ Built with **FastAPI**, persisted in **PostgreSQL**, containerized with **Docker
 | Backend | Python, FastAPI, Pydantic v2 |
 | Database | PostgreSQL, SQLAlchemy (async) |
 | ML | scikit-learn (LinearRegression, LogisticRegression), NumPy |
+| Observability | OpenTelemetry, structured JSON logging |
 | Infrastructure | Terraform, AWS ECS/Fargate, ALB, ECR, SSM |
 | CI/CD | GitHub Actions |
 | Containerization | Docker |
-| Monitoring | AWS CloudWatch |
+| Monitoring | AWS CloudWatch, OpenTelemetry traces |
+| Security | CodeQL, Dependabot, non-root Docker container |
 
 ---
 
@@ -106,3 +108,13 @@ GitHub push → CI (lint + test) → CD (build → ECR push → ECS deploy → s
 ```
 
 Infrastructure is provisioned via Terraform under `terraform/`. See `terraform/terraform.tfvars` for required input variables before applying.
+
+---
+
+## Observability
+
+**Structured logging** — All log output is JSON with ISO 8601 timestamps, log level, logger name, message, and a `request_id` correlation field. Every inbound request is assigned a unique ID (or reuses the caller's `X-Request-ID` header) that propagates through all log lines for that request. Logs ship to CloudWatch via the ECS awslogs driver.
+
+**Distributed tracing** — OpenTelemetry auto-instruments FastAPI (inbound requests), httpx (outbound API calls to balldontlie.io), and SQLAlchemy (database queries). ML prediction endpoints add custom spans for model training and inference steps. Traces export via OTLP to any compatible collector (AWS ADOT, Jaeger, Grafana Tempo). Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable export; set `OTEL_TRACES_CONSOLE=true` for local dev.
+
+**Dependency scanning** — Dependabot monitors Python packages, GitHub Actions, Terraform providers, and Docker base images for security vulnerabilities and outdated versions. CodeQL performs static analysis on every push and PR, plus a weekly scheduled scan.

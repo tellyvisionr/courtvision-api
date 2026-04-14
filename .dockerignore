@@ -36,3 +36,6 @@ README.Docker.md
 pyproject.toml
 pytest.ini
 tests/
+alembic/
+alembic.ini
+terraform/
