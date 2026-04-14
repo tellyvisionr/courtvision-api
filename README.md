@@ -98,14 +98,7 @@ pytest --cov=app -v
 
 ## Architecture
 
-```
-GitHub push → CI (lint + test) → CD (build → ECR push → ECS deploy → smoke test)
-                                          |
-                                  AWS ECS Fargate
-                                  FastAPI + PostgreSQL
-                                          |
-                                  Application Load Balancer
-```
+(courtvision-apiflow.png)
 
 Infrastructure is provisioned via Terraform under `terraform/`. See `terraform/terraform.tfvars` for required input variables before applying.
 
@@ -118,3 +111,9 @@ Infrastructure is provisioned via Terraform under `terraform/`. See `terraform/t
 **Distributed tracing** — OpenTelemetry auto-instruments FastAPI (inbound requests), httpx (outbound API calls to balldontlie.io), and SQLAlchemy (database queries). ML prediction endpoints add custom spans for model training and inference steps. Traces export via OTLP to any compatible collector (AWS ADOT, Jaeger, Grafana Tempo). Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable export; set `OTEL_TRACES_CONSOLE=true` for local dev.
 
 **Dependency scanning** — Dependabot monitors Python packages, GitHub Actions, Terraform providers, and Docker base images for security vulnerabilities and outdated versions. CodeQL performs static analysis on every push and PR, plus a weekly scheduled scan.
+
+## Deployment
+
+The service runs on AWS ECS Fargate behind an Application Load Balancer. Infrastructure is provisioned via Terraform and deployed automatically via the GitHub Actions CD pipeline.
+
+![ECS deployment](docs/courtvision-aws.png)
