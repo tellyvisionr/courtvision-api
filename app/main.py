@@ -13,6 +13,7 @@ from app.clients.balldontlie import BallDontLieClient
 from app.db import crud
 from app.db.database import engine, get_session
 from app.db.models import Base
+from app.instrumentation import instrument_app
 from app.logging_config import setup_logging
 from app.middleware import AccessLogMiddleware, RequestIDMiddleware
 from app.models import (
@@ -22,6 +23,7 @@ from app.models import (
     SeasonAveragesResponse,
 )
 from app.services import ingest, predict
+from app.telemetry import init_telemetry
 
 # --- Config / Env ---
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +36,7 @@ if not BALLDONTLIE_API_KEY:
     raise RuntimeError("Missing BALLDONTLIE_API_KEY environment variable")
 
 setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+init_telemetry()
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,8 @@ async def lifespan(app: FastAPI):
 
 # --- App ---
 app = FastAPI(title="Courtvision API", version="0.1.0", lifespan=lifespan)
+
+instrument_app(app)
 
 # Middleware: add AccessLog first so RequestID runs first (Starlette reverses order).
 app.add_middleware(AccessLogMiddleware)

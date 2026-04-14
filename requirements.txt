@@ -13,6 +13,14 @@ alembic
 scikit-learn
 numpy
 
+# Observability
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-httpx
+opentelemetry-instrumentation-sqlalchemy
+opentelemetry-exporter-otlp-proto-http
+
 # Migrations
 psycopg2-binary
 

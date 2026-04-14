@@ -7,6 +7,7 @@ feature engineering → fit → serve), not production-grade forecasting.
 """
 
 import numpy as np
+from opentelemetry import trace
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +15,8 @@ from app.db import crud
 
 _MIN_PLAYER_GAMES = 10
 _MIN_TEAM_GAMES = 20
+
+tracer = trace.get_tracer(__name__)
 
 
 async def predict_player_game(
@@ -54,16 +57,20 @@ async def predict_player_game(
     y_ast_arr = np.array(y_ast, dtype=float)
     y_reb_arr = np.array(y_reb, dtype=float)
 
-    model_pts = LinearRegression().fit(X, y_pts_arr)
-    model_ast = LinearRegression().fit(X, y_ast_arr)
-    model_reb = LinearRegression().fit(X, y_reb_arr)
+    with tracer.start_as_current_span("predict.player.train") as span:
+        span.set_attribute("player_id", player_id)
+        span.set_attribute("sample_size", len(valid_stats))
+        model_pts = LinearRegression().fit(X, y_pts_arr)
+        model_ast = LinearRegression().fit(X, y_ast_arr)
+        model_reb = LinearRegression().fit(X, y_reb_arr)
 
-    # Predict the next game: assume home, vs the specified opponent.
-    X_pred = np.array([[1, 1, len(valid_stats)]], dtype=float)
-
-    pred_pts = max(0.0, float(model_pts.predict(X_pred)[0]))
-    pred_ast = max(0.0, float(model_ast.predict(X_pred)[0]))
-    pred_reb = max(0.0, float(model_reb.predict(X_pred)[0]))
+    with tracer.start_as_current_span("predict.player.infer") as span:
+        # Predict the next game: assume home, vs the specified opponent.
+        X_pred = np.array([[1, 1, len(valid_stats)]], dtype=float)
+        pred_pts = max(0.0, float(model_pts.predict(X_pred)[0]))
+        pred_ast = max(0.0, float(model_ast.predict(X_pred)[0]))
+        pred_reb = max(0.0, float(model_reb.predict(X_pred)[0]))
+        span.set_attribute("predicted_pts", pred_pts)
 
     return {
         "player_id": player_id,
@@ -175,8 +182,14 @@ async def predict_game_outcome(
     y = np.array(targets, dtype=int)
     mean_diff = float(np.mean(score_diffs)) if score_diffs else 0.0
 
-    model = LogisticRegression(max_iter=200).fit(X, y)
-    proba = float(model.predict_proba(np.array([[1, 1, mean_diff]]))[0][1])
+    with tracer.start_as_current_span("predict.game.train") as span:
+        span.set_attribute("home_team_id", home_team_id)
+        span.set_attribute("sample_size", len(X_rows))
+        model = LogisticRegression(max_iter=200).fit(X, y)
+
+    with tracer.start_as_current_span("predict.game.infer") as span:
+        proba = float(model.predict_proba(np.array([[1, 1, mean_diff]]))[0][1])
+        span.set_attribute("home_win_probability", proba)
 
     return {
         "home_team_id": home_team_id,
