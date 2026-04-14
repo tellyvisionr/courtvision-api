@@ -41,6 +41,15 @@ init_telemetry()
 logger = logging.getLogger(__name__)
 
 
+def _safe(value: object) -> str:
+    """Sanitize a value for safe logging — prevents log injection (CWE-117).
+
+    Converts to string and strips carriage returns and newlines so that
+    attacker-controlled input cannot forge additional log lines.
+    """
+    return str(value).replace("\r", "").replace("\n", "")
+
+
 # --- Lifespan: create DB tables on startup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -90,7 +99,9 @@ async def search_players(
     try:
         result = await client.search_players(name)
     except httpx.HTTPStatusError as e:
-        logger.warning("Upstream HTTP %d during player search %r", e.response.status_code, name)
+        logger.warning(
+            "Upstream HTTP %d during player search %s", e.response.status_code, _safe(name)
+        )
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
         logger.warning("Transport error during player search: %s", e)
@@ -99,7 +110,7 @@ async def search_players(
     for player in result.data:
         await crud.upsert_player(session, player)
     await session.commit()
-    logger.info("Persisted %d players for query %r", len(result.data), name)
+    logger.info("Persisted %d players for query %s", len(result.data), _safe(name))
 
     return result
 
@@ -120,7 +131,9 @@ async def get_season_averages(
         result = await client.get_season_averages(player_id, season)
     except httpx.HTTPStatusError as e:
         logger.warning(
-            "Upstream HTTP %d for player %d season averages", e.response.status_code, player_id
+            "Upstream HTTP %d for player %s season averages",
+            e.response.status_code,
+            _safe(player_id),
         )
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
     except httpx.TransportError as e:
@@ -190,13 +203,13 @@ async def ingest_season_data(
     Long-running — intended for manual invocation, not latency-sensitive paths.
     Returns a summary of how many rows were written.
     """
-    logger.info("Starting season %d ingestion", season)
+    logger.info("Starting season %s ingestion", _safe(season))
     try:
         summary = await ingest.ingest_season(client, session, season)
     except httpx.TransportError as e:
         logger.warning("Transport error during ingestion: %s", e)
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
-    logger.info("Completed season %d ingestion: %s", season, summary)
+    logger.info("Completed season %s ingestion: %s", _safe(season), summary)
     return summary
 
 
@@ -217,17 +230,17 @@ async def predict_player(
     result = await predict.predict_player_game(session, player_id, opponent_team_id)
     if "error" in result:
         logger.info(
-            "Insufficient data for player %d vs team %d: %s",
-            player_id,
-            opponent_team_id,
-            result.get("error"),
+            "Insufficient data for player %s vs team %s: %s",
+            _safe(player_id),
+            _safe(opponent_team_id),
+            _safe(result.get("error")),
         )
         raise HTTPException(status_code=400, detail=result)
     logger.info(
-        "Player %d prediction vs team %d: pts=%.1f",
-        player_id,
-        opponent_team_id,
-        result["predicted_pts"],
+        "Player %s prediction vs team %s: pts=%s",
+        _safe(player_id),
+        _safe(opponent_team_id),
+        _safe(result["predicted_pts"]),
     )
     return result
 
@@ -249,16 +262,16 @@ async def predict_game(
     result = await predict.predict_game_outcome(session, home_team_id, away_team_id)
     if "error" in result:
         logger.info(
-            "Insufficient data for game %d vs %d: %s",
-            home_team_id,
-            away_team_id,
-            result.get("error"),
+            "Insufficient data for game %s vs %s: %s",
+            _safe(home_team_id),
+            _safe(away_team_id),
+            _safe(result.get("error")),
         )
         raise HTTPException(status_code=400, detail=result)
     logger.info(
-        "Game prediction %d vs %d: home_win=%.3f",
-        home_team_id,
-        away_team_id,
-        result["home_win_probability"],
+        "Game prediction %s vs %s: home_win=%s",
+        _safe(home_team_id),
+        _safe(away_team_id),
+        _safe(result["home_win_probability"]),
     )
     return result
