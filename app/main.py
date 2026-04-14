@@ -209,7 +209,7 @@ async def ingest_season_data(
     except httpx.TransportError as e:
         logger.warning("Transport error during ingestion: %s", e)
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
-    logger.info("Completed season %s ingestion: %s", _safe(season), summary)
+    logger.info("Completed season %s ingestion: %s", _safe(season), _safe(summary))
     return summary
 
 
