@@ -5,10 +5,16 @@ httpx
 python-dotenv
 pydantic
 tenacity
-requests
 sqlalchemy[asyncio]
 asyncpg
 alembic
+
+# ML
+scikit-learn
+numpy
+
+# Migrations
+psycopg2-binary
 
 # Dev / CI
 pytest

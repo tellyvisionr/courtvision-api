@@ -18,7 +18,7 @@ from app.models import (
     PlayerSearchResponse,
     SeasonAveragesResponse,
 )
-from app.services import ingest
+from app.services import ingest, predict
 
 # --- Config / Env ---
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -167,3 +167,43 @@ async def ingest_season_data(
     except httpx.TransportError as e:
         raise HTTPException(status_code=503, detail=f"Upstream unreachable: {e}") from e
     return summary
+
+
+@app.get(
+    "/predict/player",
+    responses={400: {"model": ErrorResponse}},
+)
+async def predict_player(
+    player_id: int = Query(..., description="Player ID from balldontlie"),
+    opponent_team_id: int = Query(..., description="Opponent team ID"),
+    session=Depends(get_session),
+):
+    """Predict player stats (pts/ast/reb) against a specific opponent.
+
+    Uses linear regression trained on the player's historical game logs.
+    Requires data ingestion via POST /ingest/{season} first.
+    """
+    result = await predict.predict_player_game(session, player_id, opponent_team_id)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result)
+    return result
+
+
+@app.get(
+    "/predict/game",
+    responses={400: {"model": ErrorResponse}},
+)
+async def predict_game(
+    home_team_id: int = Query(..., description="Home team ID"),
+    away_team_id: int = Query(..., description="Away team ID"),
+    session=Depends(get_session),
+):
+    """Predict game outcome (win probability) for a matchup.
+
+    Uses logistic regression trained on historical game results.
+    Requires data ingestion via POST /ingest/{season} first.
+    """
+    result = await predict.predict_game_outcome(session, home_team_id, away_team_id)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result)
+    return result
