@@ -1,6 +1,6 @@
 # CourtVision API
 
-A basketball statistics microservice wrapping the [balldontlie.io](https://www.balldontlie.io) API, built to demonstrate end-to-end DevOps and platform engineering practices.
+A basketball statistics microservice wrapping the [balldontlie.io](https://www.balldontlie.io) API, built to demonstrate end-to-end engineering practices.
 
 Built with **FastAPI**, persisted in **PostgreSQL**, containerized with **Docker**, provisioned with **Terraform**, and deployed to **AWS ECS Fargate** via a **GitHub Actions CI/CD pipeline**.
 
